@@ -1,0 +1,13 @@
+name: Enforce PR Checklist
+
+on:
+  workflow_call:
+
+jobs:
+  checklist:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require PR checklist
+        uses: mheap/require-checklist-action@v2
+        with:
+          checklist-path: ""
