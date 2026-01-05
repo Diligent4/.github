@@ -1,15 +1,38 @@
-name: Enforce PR Checklist
+name: Check PR Checkboxes
 
 on:
-  workflow_call: {}      # allows other workflows to call this
-  pull_request_target:   # required to run on PRs from forks
-    types: [opened, edited, synchronize]
+  pull_request:
+    types: [opened, edited, synchronize, reopened]
 
 jobs:
-  checklist:
+  check-checkboxes:
     runs-on: ubuntu-latest
     steps:
-      - name: Require PR checklist
-        uses: mheap/require-checklist-action@v2
+      - name: Check if all checkboxes are checked
+        uses: actions/github-script@v7
         with:
-          checklist-path: ""
+          script: |
+            const prBody = context.payload.pull_request.body || '';
+            
+            // Find all checkboxes in the PR description
+            const checkboxPattern = /- \[([ xX])\]/g;
+            const checkboxes = [...prBody.matchAll(checkboxPattern)];
+            
+            if (checkboxes.length === 0) {
+              console.log('No checkboxes found in PR description');
+              return;
+            }
+            
+            const uncheckedBoxes = checkboxes.filter(match => match[1] === ' ');
+            const totalBoxes = checkboxes.length;
+            const checkedBoxes = totalBoxes - uncheckedBoxes.length;
+            
+            console.log(`Checkboxes: ${checkedBoxes}/${totalBoxes} checked`);
+            
+            if (uncheckedBoxes.length > 0) {
+              core.setFailed(
+                `❌ Please check all boxes in the PR description (${checkedBoxes}/${totalBoxes} checked)`
+              );
+            } else {
+              console.log('✅ All checkboxes are checked!');
+            }
