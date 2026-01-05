@@ -1,7 +1,9 @@
 name: Enforce PR Checklist
 
 on:
-  workflow_call:
+  workflow_call: {}      # allows other workflows to call this
+  pull_request_target:   # required to run on PRs from forks
+    types: [opened, edited, synchronize]
 
 jobs:
   checklist:
