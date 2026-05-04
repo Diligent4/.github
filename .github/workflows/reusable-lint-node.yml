@@ -75,6 +75,11 @@ on:
         required: false
         type: boolean
         default: false
+      config-ref:
+        description: 'Ref of Diligent4/.github to fetch canonical configs from. Defaults to main; during pilot, callers pass "conventions" to match the reusable ref they''re calling.'
+        required: false
+        type: string
+        default: 'main'
 
 env:
   # Opt transitive JS actions onto Node 24 early; default 2026-06-02.
@@ -130,6 +135,17 @@ jobs:
       - name: Audit dependencies
         if: inputs.audit
         run: npm audit --omit=dev --audit-level=high
+
+      - name: Fetch canonical TypeScript ESLint rules
+        if: inputs.run-eslint
+        run: |
+          # Pull the canonical TS lint rules (boundary rules + base ts rules)
+          # from Diligent4/.github. Consumer's eslint.config.{js,mjs} imports
+          # named exports from `./.canonical-eslint-rules.js`.
+          echo "Fetching canonical eslint rules at ref: ${{ inputs.config-ref }}"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/Diligent4/.github/${{ inputs.config-ref }}/configs/typescript-eslint-rules.js" \
+            -o "${{ inputs.working-directory }}/.canonical-eslint-rules.js"
 
       - name: Biome check
         if: inputs.run-biome
