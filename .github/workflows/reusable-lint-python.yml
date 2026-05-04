@@ -142,25 +142,30 @@ jobs:
       - name: Install dependencies
         run: uv sync ${{ inputs.uv-sync-args }}
 
+      # Each lint stage runs regardless of earlier-stage failures so a single
+      # CI run surfaces ALL issues at once (lint + format + typecheck + tests).
+      # `!cancelled()` preserves PR-cancel-on-update behavior; the implicit
+      # default `success()` would skip a stage when its predecessor failed.
+      #
       # Ruff doesn't need project-venv context — it only reads source files +
       # pyproject.toml [tool.ruff] config. Use `uvx` so consumers don't need
       # ruff in their dev deps (matches the fleet, where most repos don't).
       - name: Ruff check
-        if: inputs.run-ruff-lint
+        if: ${{ !cancelled() && inputs.run-ruff-lint }}
         run: uvx ruff check .
 
       - name: Ruff format check
-        if: inputs.run-ruff-format
+        if: ${{ !cancelled() && inputs.run-ruff-format }}
         run: uvx ruff format --check .
 
       # basedpyright needs the project venv so it can resolve imports of
       # flingoos-shared-models, etc. Consumer must include it in dev deps.
       - name: basedpyright
-        if: inputs.run-typecheck
+        if: ${{ !cancelled() && inputs.run-typecheck }}
         run: uv run basedpyright
 
       - name: Pytest
-        if: inputs.run-tests
+        if: ${{ !cancelled() && inputs.run-tests }}
         run: ${{ inputs.test-command }}
 
       - name: Summary
