@@ -69,6 +69,11 @@ on:
         required: false
         type: string
         default: '--frozen --all-extras'
+      config-ref:
+        description: 'Ref of Diligent4/.github to fetch canonical configs from. Defaults to main; during pilot, callers pass "conventions" to match the reusable ref they''re calling.'
+        required: false
+        type: string
+        default: 'main'
 
 env:
   FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
