@@ -18,6 +18,19 @@ This file is **the canonical source**. Per-repo overrides live in the consumer's
 | Pre-commit         | Lefthook                                  | Lefthook                            |
 | GCP region         | me-west1                                  | me-west1                            |
 
+### Quality layers — all required, all independent
+
+Lint, type-check, and tests are **separate concerns**. CI runs them as **separate steps** and **all must pass**:
+
+| Layer | TypeScript | Python | Catches | Misses |
+|---|---|---|---|---|
+| Lint + format | Biome v2 | Ruff | Style, conventions (no-default-export, no-enum), unused imports, simple patterns | Real type/runtime bugs |
+| **Type check** | **tsc --noEmit** | **basedpyright** | Null handling, contract violations, generic mismatches, cross-module type errors | Style + conventions |
+| Tests | vitest (jest in `flingoos-shared`) | pytest | Behavior | Static issues |
+| Boundary rules | ESLint custom (`eslint-boundary-rules.js`) | Ruff TID251 banned-api | Architectural rules (no direct LLM/storage imports, no LLM env reads) | Type-level issues |
+
+Skipping a layer is not an option. Lint without type-check misses ~90% of real bugs; type-check without lint misses convention violations and architectural rules. The `reusable-lint-{node,python}.yml` workflows enforce this — every step is independent and every step must pass.
+
 ## TypeScript
 
 ### Required `tsconfig.json` flags
@@ -128,6 +141,7 @@ All repos consume reusable workflows from `Diligent4/.github`:
 
 ### Workflow rules
 
+- **Lint, type-check, and tests as separate steps** — never combine into one umbrella script (`npm run check`, `make ci`). Each layer is an independent gate; the CI log must show which layer failed without re-running. The `reusable-lint-{node,python}.yml` workflows already enforce this shape.
 - **SHA-pin** all third-party actions (post-`tj-actions/changed-files` CVE).
 - **Concurrency cancellation** on PR runs:
   ```yaml
