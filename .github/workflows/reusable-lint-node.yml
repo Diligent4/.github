@@ -132,8 +132,12 @@ jobs:
             npm ci --prefer-offline
           fi
 
+      # Each lint/check stage runs regardless of earlier-stage failures so a
+      # single CI run surfaces ALL issues at once. `!cancelled()` preserves
+      # PR-cancel-on-update behavior; the implicit default `success()` would
+      # skip a stage when its predecessor failed.
       - name: Audit dependencies
-        if: inputs.audit
+        if: ${{ !cancelled() && inputs.audit }}
         run: npm audit --omit=dev --audit-level=high
 
       - name: Fetch canonical TypeScript ESLint rules
@@ -149,19 +153,19 @@ jobs:
             -o ".canonical-eslint-rules.js"
 
       - name: Biome check
-        if: inputs.run-biome
+        if: ${{ !cancelled() && inputs.run-biome }}
         run: npx --no biome ci .
 
       - name: ESLint
-        if: inputs.run-eslint
+        if: ${{ !cancelled() && inputs.run-eslint }}
         run: npx --no eslint .
 
       - name: TypeScript check
-        if: inputs.run-tsc
+        if: ${{ !cancelled() && inputs.run-tsc }}
         run: npx --no tsc --noEmit
 
       - name: Run tests
-        if: inputs.run-tests
+        if: ${{ !cancelled() && inputs.run-tests }}
         # Resolve the command at expression-evaluation time to avoid empty-body
         # bash if/elif when test-command is unset. GitHub's `&&`/`||` returns
         # the operand value (not a boolean), so this is a 3-way ternary.
