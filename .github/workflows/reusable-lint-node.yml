@@ -145,14 +145,10 @@ jobs:
 
       - name: Run tests
         if: inputs.run-tests
-        run: |
-          if [[ -n "${{ inputs.test-command }}" ]]; then
-            ${{ inputs.test-command }}
-          elif [[ "${{ inputs.package-manager }}" == "pnpm" ]]; then
-            pnpm test
-          else
-            npm test
-          fi
+        # Resolve the command at expression-evaluation time to avoid empty-body
+        # bash if/elif when test-command is unset. GitHub's `&&`/`||` returns
+        # the operand value (not a boolean), so this is a 3-way ternary.
+        run: ${{ inputs.test-command != '' && inputs.test-command || (inputs.package-manager == 'pnpm' && 'pnpm test' || 'npm test') }}
 
       - name: Summary
         if: always()
