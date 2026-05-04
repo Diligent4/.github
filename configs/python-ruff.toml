@@ -52,7 +52,16 @@ ignore = [
 ]
 
 # Boundary rules — fleet-wide architecture invariants.
-# Per-repo can OVERRIDE messages or ADD new bans in their pyproject.toml.
+#
+# !! WARNING — Ruff's `extend` uses REPLACE semantics for the
+# [banned-api] table, NOT merge. If a consumer pyproject.toml declares its own
+# [tool.ruff.lint.flake8-tidy-imports.banned-api] table, it COMPLETELY REPLACES
+# this canonical table. Entries listed here that aren't redeclared locally
+# are silently dropped — architectural guardrails go inactive without warning.
+#
+# Consumers overriding ANY entry MUST redeclare ALL canonical entries
+# (with their own messages or unchanged). Verified empirically with
+# `uvx ruff check` against a test pyproject — only locally-declared keys fire.
 [lint.flake8-tidy-imports.banned-api]
 # All LLM access goes through flingoos_shared_models.llm
 "openai".msg = "Use flingoos_shared_models.llm.{chat,embed,vision,get_raw_client} instead. The shared package handles BYOK key resolution, telemetry, and cost attribution."
