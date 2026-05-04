@@ -130,12 +130,13 @@ jobs:
           # pyproject.toml extend it via `[tool.ruff] extend = ".canonical-ruff.toml"`.
           # The ref defaults to `main`; pilot consumers pass `config-ref: conventions`
           # until the conventions PR merges.
+          # Path is relative — curl runs in the job's defaults.run.working-directory.
           echo "Fetching canonical ruff config at ref: ${{ inputs.config-ref }}"
           curl -fsSL \
             "https://raw.githubusercontent.com/Diligent4/.github/${{ inputs.config-ref }}/configs/python-ruff.toml" \
-            -o "${{ inputs.working-directory }}/.canonical-ruff.toml"
+            -o ".canonical-ruff.toml"
           echo "::group::Canonical config"
-          cat "${{ inputs.working-directory }}/.canonical-ruff.toml"
+          cat ".canonical-ruff.toml"
           echo "::endgroup::"
 
       - name: Install dependencies
