@@ -118,6 +118,24 @@ jobs:
           echo "::add-mask::$AR_TOKEN"
           echo "UV_EXTRA_INDEX_URL=https://oauth2accesstoken:${AR_TOKEN}@me-west1-python.pkg.dev/flingoos-production/flingoos-python/simple/" >> "$GITHUB_ENV"
 
+      - name: Fetch canonical Ruff config
+        if: inputs.run-ruff-lint || inputs.run-ruff-format
+        run: |
+          # Pull the canonical ruff config from Diligent4/.github at the same
+          # ref this reusable was called with. Consumers' pyproject.toml extend
+          # it via `[tool.ruff] extend = ".canonical-ruff.toml"`.
+          # github.workflow_ref looks like:
+          #   Diligent4/.github/.github/workflows/reusable-lint-python.yml@refs/heads/conventions
+          REF="${{ github.workflow_ref }}"
+          RUFF_REF=$(echo "$REF" | sed -E 's|.*@refs/heads/||; s|.*@refs/tags/||; s|.*@||')
+          echo "Fetching canonical ruff config at ref: $RUFF_REF"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/Diligent4/.github/${RUFF_REF}/configs/python-ruff.toml" \
+            -o "${{ inputs.working-directory }}/.canonical-ruff.toml"
+          echo "::group::Canonical config"
+          cat "${{ inputs.working-directory }}/.canonical-ruff.toml"
+          echo "::endgroup::"
+
       - name: Install dependencies
         run: uv sync ${{ inputs.uv-sync-args }}
 

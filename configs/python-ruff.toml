@@ -1,0 +1,80 @@
+# Diligent4 canonical Ruff config for Python repos.
+#
+# Consumed by every Python repo via:
+#
+#   [tool.ruff]
+#   extend = ".canonical-ruff.toml"
+#
+# The reusable workflow at Diligent4/.github/.github/workflows/reusable-lint-python.yml
+# fetches this file at CI start and writes it as `.canonical-ruff.toml` in the
+# consumer's workspace, so the `extend` path resolves.
+#
+# Consumers add ONLY genuine per-repo bits to their pyproject.toml [tool.ruff]:
+#   - [tool.ruff.lint.per-file-ignores] — file paths differ per repo
+#   - [tool.ruff.lint.isort] known-first-party — package names differ per repo
+#   - [tool.ruff.lint.flake8-tidy-imports.banned-api] — repo-specific message
+#     overrides or additional bans (e.g., chatbot bans langchain_openai with a
+#     pointer to FlingoosChatModel)
+#
+# Update process: PR to Diligent4/.github → merge → consumers pick up on next CI.
+
+target-version = "py313"
+line-length = 100
+
+[lint]
+# Canonical rule families across the fleet.
+select = [
+    "E",      # pycodestyle errors
+    "W",      # pycodestyle warnings
+    "F",      # pyflakes
+    "I",      # isort
+    "N",      # pep8-naming
+    "UP",     # pyupgrade
+    "B",      # flake8-bugbear
+    "SIM",    # flake8-simplify
+    "RUF",    # ruff-specific
+    "TCH",    # flake8-type-checking
+    "TID251", # flake8-tidy-imports banned-api (boundary rules below)
+]
+
+# Fleet-wide ignores. Repo-specific additions go in pyproject.toml.
+ignore = [
+    "E501",   # line too long (handled by formatter)
+    "E402",   # module-level import not at top (needed for sys.path manipulation)
+    "B007",   # loop variable not used (unpacking for readability)
+    "B008",   # function call in argument defaults (FastAPI Depends())
+    "B904",   # raise from in except (FastAPI HTTPException reraise pattern)
+    "N815",   # mixedCase variable in class (Firestore field names: displayName, photoURL)
+    "SIM102", # nested if (readability over compactness)
+    "SIM103", # return condition directly
+    "SIM116", # dict instead of if/elif
+    "UP046",  # Generic subclass vs type params (Pydantic BaseModel compat)
+]
+
+# Boundary rules — fleet-wide architecture invariants.
+# Per-repo can OVERRIDE messages or ADD new bans in their pyproject.toml.
+[lint.flake8-tidy-imports.banned-api]
+# All LLM access goes through flingoos_shared_models.llm
+"openai".msg = "Use flingoos_shared_models.llm.{chat,embed,vision,get_raw_client} instead. The shared package handles BYOK key resolution, telemetry, and cost attribution."
+"anthropic".msg = "Use flingoos_shared_models.llm.{chat,embed,vision,get_raw_client} instead."
+"google.genai".msg = "Use flingoos_shared_models.llm.{chat,embed,vision,get_raw_client} instead."
+"google.generativeai".msg = "Use flingoos_shared_models.llm.{chat,embed,vision,get_raw_client} instead."
+"cohere".msg = "Use flingoos_shared_models.llm instead."
+"mistralai".msg = "Use flingoos_shared_models.llm instead."
+"groq".msg = "Use flingoos_shared_models.llm instead."
+"langchain".msg = "Use flingoos_shared_models.llm instead."
+"langchain_openai".msg = "Use flingoos_shared_models.llm instead."
+"langchain_anthropic".msg = "Use flingoos_shared_models.llm instead."
+
+# All blob/bucket storage through flingoos_shared_models.storage (or .azure_storage)
+# NOT banned: firebase_admin, google.cloud.firestore — Firestore stays direct.
+"google.cloud.storage".msg = "Use flingoos_shared_models.storage (get_impersonated_gcs_client / resolve_org_storage) instead."
+"boto3".msg = "Use flingoos_shared_models.storage — S3 access flows through the shared resolver."
+"botocore".msg = "Use flingoos_shared_models.storage — S3 access flows through the shared resolver."
+"azure.storage.blob".msg = "Use flingoos_shared_models.azure_storage (get_federated_blob_service_client / generate_user_delegation_sas_url) instead."
+
+[format]
+quote-style = "double"
+indent-style = "space"
+line-ending = "lf"
+docstring-code-format = true
