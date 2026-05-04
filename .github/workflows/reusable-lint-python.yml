@@ -1,0 +1,180 @@
+# Reusable Python lint + typecheck + test workflow.
+# Consumed by every Python repo in Diligent4.
+#
+# Caller example:
+#   jobs:
+#     ci:
+#       uses: Diligent4/.github/.github/workflows/reusable-lint-python.yml@main
+#       with:
+#         needs-ar-auth: true
+#       secrets: inherit
+
+name: Reusable Python Lint
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: 'Directory containing pyproject.toml (relative to repo root)'
+        required: false
+        type: string
+        default: '.'
+      python-version:
+        description: 'Python version'
+        required: false
+        type: string
+        default: '3.13'
+      needs-ar-auth:
+        description: 'Authenticate to Google Artifact Registry for flingoos-shared-models'
+        required: false
+        type: boolean
+        default: false
+      project-id:
+        description: 'GCP project for AR auth (only used when needs-ar-auth=true)'
+        required: false
+        type: string
+        default: 'flingoos-production'
+      project-number:
+        description: 'GCP project number for WIF (only used when needs-ar-auth=true)'
+        required: false
+        type: string
+        default: '407742180982'
+      run-ruff-lint:
+        description: 'Run ruff check'
+        required: false
+        type: boolean
+        default: true
+      run-ruff-format:
+        description: 'Run ruff format --check'
+        required: false
+        type: boolean
+        default: true
+      run-typecheck:
+        description: 'Run basedpyright'
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        description: 'Run pytest'
+        required: false
+        type: boolean
+        default: true
+      test-command:
+        description: 'Test command override'
+        required: false
+        type: string
+        default: 'uv run pytest'
+      uv-sync-args:
+        description: 'Extra args passed to `uv sync` (e.g. --all-extras)'
+        required: false
+        type: string
+        default: '--frozen --all-extras'
+      config-ref:
+        description: 'Ref of Diligent4/.github to fetch canonical configs from. Defaults to main; during pilot, callers pass "conventions" to match the reusable ref they''re calling.'
+        required: false
+        type: string
+        default: 'main'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Install uv
+        # v8 dropped major/minor tags for supply-chain hardening — must SHA-pin.
+        uses: astral-sh/setup-uv@08807647e7069bb48b6ef5acd8ec9567f424441b # v8.1.0
+        with:
+          python-version: ${{ inputs.python-version }}
+          enable-cache: true
+          cache-dependency-glob: ${{ inputs.working-directory }}/uv.lock
+
+      - name: Auth to Google Cloud
+        if: inputs.needs-ar-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/${{ inputs.project-number }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deployer@${{ inputs.project-id }}.iam.gserviceaccount.com
+
+      - name: Setup gcloud
+        if: inputs.needs-ar-auth
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+
+      - name: Configure uv for Google Artifact Registry
+        if: inputs.needs-ar-auth
+        run: |
+          # Token-embedded extra-index-url. Works with both named AND unnamed
+          # [[tool.uv.index]] declarations in pyproject.toml — the fleet has
+          # a mix. Matches the existing pattern in flingoos-bridge-backend-service.
+          # Token is short-lived (~1h), no JSON keys.
+          AR_TOKEN="$(gcloud auth print-access-token)"
+          echo "::add-mask::$AR_TOKEN"
+          echo "UV_EXTRA_INDEX_URL=https://oauth2accesstoken:${AR_TOKEN}@me-west1-python.pkg.dev/flingoos-production/flingoos-python/simple/" >> "$GITHUB_ENV"
+
+      - name: Fetch canonical Ruff config
+        if: inputs.run-ruff-lint || inputs.run-ruff-format
+        run: |
+          # Pull the canonical ruff config from Diligent4/.github. Consumers'
+          # pyproject.toml extend it via `[tool.ruff] extend = ".canonical-ruff.toml"`.
+          # The ref defaults to `main`; pilot consumers pass `config-ref: conventions`
+          # until the conventions PR merges.
+          # Path is relative — curl runs in the job's defaults.run.working-directory.
+          echo "Fetching canonical ruff config at ref: ${{ inputs.config-ref }}"
+          curl -fsSL \
+            "https://raw.githubusercontent.com/Diligent4/.github/${{ inputs.config-ref }}/configs/python-ruff.toml" \
+            -o ".canonical-ruff.toml"
+          echo "::group::Canonical config"
+          cat ".canonical-ruff.toml"
+          echo "::endgroup::"
+
+      - name: Install dependencies
+        run: uv sync ${{ inputs.uv-sync-args }}
+
+      # Ruff doesn't need project-venv context — it only reads source files +
+      # pyproject.toml [tool.ruff] config. Use `uvx` so consumers don't need
+      # ruff in their dev deps (matches the fleet, where most repos don't).
+      - name: Ruff check
+        if: inputs.run-ruff-lint
+        run: uvx ruff check .
+
+      - name: Ruff format check
+        if: inputs.run-ruff-format
+        run: uvx ruff format --check .
+
+      # basedpyright needs the project venv so it can resolve imports of
+      # flingoos-shared-models, etc. Consumer must include it in dev deps.
+      - name: basedpyright
+        if: inputs.run-typecheck
+        run: uv run basedpyright
+
+      - name: Pytest
+        if: inputs.run-tests
+        run: ${{ inputs.test-command }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Python CI"
+            echo "| Check | Ran |"
+            echo "|---|---|"
+            echo "| ruff check | ${{ inputs.run-ruff-lint }} |"
+            echo "| ruff format --check | ${{ inputs.run-ruff-format }} |"
+            echo "| basedpyright | ${{ inputs.run-typecheck }} |"
+            echo "| pytest | ${{ inputs.run-tests }} |"
+            echo "| AR auth | ${{ inputs.needs-ar-auth }} |"
+            echo "| Working dir | \`${{ inputs.working-directory }}\` |"
+            echo "| Python | \`${{ inputs.python-version }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"
