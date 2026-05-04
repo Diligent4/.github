@@ -121,14 +121,19 @@ jobs:
       - name: Install dependencies
         run: uv sync ${{ inputs.uv-sync-args }}
 
+      # Ruff doesn't need project-venv context — it only reads source files +
+      # pyproject.toml [tool.ruff] config. Use `uvx` so consumers don't need
+      # ruff in their dev deps (matches the fleet, where most repos don't).
       - name: Ruff check
         if: inputs.run-ruff-lint
-        run: uv run ruff check .
+        run: uvx ruff check .
 
       - name: Ruff format check
         if: inputs.run-ruff-format
-        run: uv run ruff format --check .
+        run: uvx ruff format --check .
 
+      # basedpyright needs the project venv so it can resolve imports of
+      # flingoos-shared-models, etc. Consumer must include it in dev deps.
       - name: basedpyright
         if: inputs.run-typecheck
         run: uv run basedpyright
