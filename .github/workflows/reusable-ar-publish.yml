@@ -1,0 +1,246 @@
+# Reusable Google Artifact Registry publish workflow.
+# Generalized version of flingoos-shared/publish.yml — handles npm and Python
+# packages with the same WIF auth + AR endpoint pattern.
+#
+# The auto-bump-version PR pattern from flingoos-shared/publish.yml stays in
+# that repo's wrapper workflow — it's specific to the keystone shared package
+# and not appropriate to bake into a reusable workflow.
+#
+# Caller example:
+#   jobs:
+#     publish-npm:
+#       uses: Diligent4/.github/.github/workflows/reusable-ar-publish.yml@main
+#       with:
+#         package-type: npm
+#         version: 1.2.3
+#         npm-tag: latest
+#       secrets: inherit
+#
+#     publish-python:
+#       uses: Diligent4/.github/.github/workflows/reusable-ar-publish.yml@main
+#       with:
+#         package-type: python
+#         package-path: python/flingoos_shared_models
+#         version: 1.2.3
+#         ar-repo: flingoos-python
+#       secrets: inherit
+
+name: Reusable AR Publish
+
+on:
+  workflow_call:
+    inputs:
+      package-type:
+        description: 'npm or python'
+        required: true
+        type: string
+      package-path:
+        description: 'Directory containing package.json (npm) or pyproject.toml (python)'
+        required: false
+        type: string
+        default: '.'
+      version:
+        description: 'Explicit version to publish. If empty, version comes from manifest.'
+        required: false
+        type: string
+        default: ''
+      ar-region:
+        required: false
+        type: string
+        default: 'me-west1'
+      ar-project:
+        required: false
+        type: string
+        default: 'flingoos-production'
+      project-number:
+        required: false
+        type: string
+        default: '407742180982'
+      ar-repo:
+        description: 'AR repo name (e.g. flingoos-npm, flingoos-python)'
+        required: true
+        type: string
+      package-name:
+        description: 'Canonical package name (used for collision lookup, e.g. @flingoos/shared)'
+        required: true
+        type: string
+      npm-tag:
+        description: 'npm dist-tag (only used when package-type=npm)'
+        required: false
+        type: string
+        default: 'latest'
+      node-version:
+        required: false
+        type: string
+        default: '24'
+      python-version:
+        required: false
+        type: string
+        default: '3.13'
+      build-command:
+        description: 'Build command before publish (e.g. "npm run build")'
+        required: false
+        type: string
+        default: ''
+      treat-collision-as-success:
+        description: 'If the version already exists in AR for the same commit, exit success'
+        required: false
+        type: boolean
+        default: true
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    concurrency:
+      group: publish-${{ inputs.package-name }}-${{ github.ref }}
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: ${{ inputs.package-path }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: ${{ github.ref_name }}
+          fetch-depth: 0
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/${{ inputs.project-number }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deployer@${{ inputs.ar-project }}.iam.gserviceaccount.com
+          project_id: ${{ inputs.ar-project }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ inputs.ar-project }}
+
+      # --- npm path ---
+      - name: Setup Node.js
+        if: inputs.package-type == 'npm'
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: 'npm'
+          cache-dependency-path: ${{ inputs.package-path }}/package-lock.json
+
+      - name: Configure npm for Artifact Registry
+        if: inputs.package-type == 'npm'
+        run: npx -y google-artifactregistry-auth
+
+      - name: Install npm dependencies
+        if: inputs.package-type == 'npm'
+        run: npm ci --prefer-offline
+
+      - name: Set npm version
+        if: inputs.package-type == 'npm' && inputs.version != ''
+        run: npm version "${{ inputs.version }}" --no-git-tag-version --allow-same-version
+
+      - name: Build npm package
+        if: inputs.package-type == 'npm' && inputs.build-command != ''
+        run: ${{ inputs.build-command }}
+
+      - name: Publish to npm AR
+        if: inputs.package-type == 'npm'
+        run: |
+          TARGET="$(node -p "require('./package.json').version")"
+          if npm publish --tag "${{ inputs.npm-tag }}"; then
+            exit 0
+          fi
+          # Collision handling: if the version already exists AND was published from
+          # the current commit, treat as a safe re-run.
+          if [[ "${{ inputs.treat-collision-as-success }}" != "true" ]]; then
+            exit 1
+          fi
+          if gcloud artifacts versions describe "$TARGET" \
+                --repository="${{ inputs.ar-repo }}" \
+                --location="${{ inputs.ar-region }}" \
+                --package="${{ inputs.package-name }}" \
+                --project="${{ inputs.ar-project }}" 2>/dev/null; then
+            TAG_SHA="$(git rev-parse -q --verify "refs/tags/v${TARGET}^{commit}" || true)"
+            HEAD_SHA="$(git rev-parse HEAD)"
+            if [[ -n "$TAG_SHA" && "$TAG_SHA" == "$HEAD_SHA" ]]; then
+              echo "::notice::npm: ${TARGET} already published for this commit — safe skip"
+              exit 0
+            fi
+            echo "::error::npm: ${TARGET} already published from a different commit (tag: ${TAG_SHA:-<missing>}, HEAD: ${HEAD_SHA})"
+            exit 1
+          fi
+          exit 1
+
+      # --- Python path ---
+      - name: Setup Python
+        if: inputs.package-type == 'python'
+        uses: actions/setup-python@a309ff8b426b58ec0e2a45f0f869d46889d02405 # v6.2.0
+        with:
+          python-version: ${{ inputs.python-version }}
+
+      - name: Install Python build deps
+        if: inputs.package-type == 'python'
+        run: pip install build==1.4.3 twine==6.2.0 keyrings.google-artifactregistry-auth
+
+      - name: Set Python version
+        if: inputs.package-type == 'python' && inputs.version != ''
+        run: |
+          python <<'EOF'
+          import re
+          path = 'pyproject.toml'
+          content = open(path).read()
+          content = re.sub(r'^version\s*=\s*".*?"', f'version = "${{ inputs.version }}"', content, count=1, flags=re.M)
+          open(path, 'w').write(content)
+          EOF
+
+      - name: Build Python package
+        if: inputs.package-type == 'python'
+        run: python -m build --wheel
+
+      - name: Publish to Python AR
+        if: inputs.package-type == 'python'
+        run: |
+          TARGET="$(python -c "import re; print(re.search(r'version\s*=\s*\"(.*?)\"', open('pyproject.toml').read()).group(1))")"
+          if twine upload \
+              --repository-url "https://${{ inputs.ar-region }}-python.pkg.dev/${{ inputs.ar-project }}/${{ inputs.ar-repo }}/" \
+              dist/*; then
+            exit 0
+          fi
+          if [[ "${{ inputs.treat-collision-as-success }}" != "true" ]]; then
+            exit 1
+          fi
+          if gcloud artifacts versions describe "$TARGET" \
+                --repository="${{ inputs.ar-repo }}" \
+                --location="${{ inputs.ar-region }}" \
+                --package="${{ inputs.package-name }}" \
+                --project="${{ inputs.ar-project }}" 2>/dev/null; then
+            TAG_SHA="$(git rev-parse -q --verify "refs/tags/v${TARGET}^{commit}" || true)"
+            HEAD_SHA="$(git rev-parse HEAD)"
+            if [[ -n "$TAG_SHA" && "$TAG_SHA" == "$HEAD_SHA" ]]; then
+              echo "::notice::Python: ${TARGET} already published for this commit — safe skip"
+              exit 0
+            fi
+            echo "::error::Python: ${TARGET} already published from a different commit (tag: ${TAG_SHA:-<missing>}, HEAD: ${HEAD_SHA})"
+            exit 1
+          fi
+          exit 1
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## AR Publish"
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Type | ${{ inputs.package-type }} |"
+            echo "| Package | \`${{ inputs.package-name }}\` |"
+            echo "| Repo | \`${{ inputs.ar-repo }}\` |"
+            echo "| Version | \`${{ inputs.version || 'from manifest' }}\` |"
+            echo "| Branch | \`${{ github.ref_name }} \` |"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,171 @@
+# Reusable Node.js lint + typecheck + test workflow.
+# Consumed by every TypeScript/JavaScript repo in Diligent4.
+#
+# Caller example:
+#   jobs:
+#     ci:
+#       uses: Diligent4/.github/.github/workflows/reusable-lint-node.yml@main
+#       with:
+#         working-directory: frontend
+#         needs-ar-auth: true
+#       secrets: inherit
+
+name: Reusable Node Lint
+
+on:
+  workflow_call:
+    inputs:
+      working-directory:
+        description: 'Directory containing package.json (relative to repo root)'
+        required: false
+        type: string
+        default: '.'
+      node-version:
+        description: 'Node.js version'
+        required: false
+        type: string
+        default: '24'
+      package-manager:
+        description: 'pnpm or npm'
+        required: false
+        type: string
+        default: 'npm'
+      needs-ar-auth:
+        description: 'Authenticate to Google Artifact Registry for @flingoos/* packages'
+        required: false
+        type: boolean
+        default: false
+      project-id:
+        description: 'GCP project for AR auth (only used when needs-ar-auth=true)'
+        required: false
+        type: string
+        default: 'flingoos-production'
+      project-number:
+        description: 'GCP project number for WIF (only used when needs-ar-auth=true)'
+        required: false
+        type: string
+        default: '407742180982'
+      run-biome:
+        description: 'Run biome ci'
+        required: false
+        type: boolean
+        default: true
+      run-eslint:
+        description: 'Run eslint (set true if Biome is not yet adopted)'
+        required: false
+        type: boolean
+        default: false
+      run-tsc:
+        description: 'Run tsc --noEmit'
+        required: false
+        type: boolean
+        default: true
+      run-tests:
+        description: 'Run the test suite'
+        required: false
+        type: boolean
+        default: true
+      test-command:
+        description: 'Test command (defaults match npm/pnpm test)'
+        required: false
+        type: string
+        default: ''
+      audit:
+        description: 'Run dependency audit (npm audit --omit=dev --audit-level=high)'
+        required: false
+        type: boolean
+        default: false
+
+env:
+  # Opt transitive JS actions onto Node 24 early; default 2026-06-02.
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  lint:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    defaults:
+      run:
+        working-directory: ${{ inputs.working-directory }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Setup pnpm
+        if: inputs.package-manager == 'pnpm'
+        uses: pnpm/action-setup@8912a9102ac27614460f54aedde9e1e7f9aec20d # v6.0.5
+        with:
+          run_install: false
+
+      - name: Setup Node.js
+        uses: actions/setup-node@48b55a011bda9f5d6aeb4c2d9c7362e8dae4041e # v6.4.0
+        with:
+          node-version: ${{ inputs.node-version }}
+          cache: ${{ inputs.package-manager }}
+          cache-dependency-path: ${{ inputs.working-directory }}/${{ inputs.package-manager == 'pnpm' && 'pnpm-lock.yaml' || 'package-lock.json' }}
+
+      - name: Auth to Google Cloud
+        if: inputs.needs-ar-auth
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/${{ inputs.project-number }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deployer@${{ inputs.project-id }}.iam.gserviceaccount.com
+
+      - name: Configure npm for Artifact Registry
+        if: inputs.needs-ar-auth
+        run: npx -y google-artifactregistry-auth
+
+      - name: Install dependencies
+        run: |
+          if [[ "${{ inputs.package-manager }}" == "pnpm" ]]; then
+            pnpm install --frozen-lockfile
+          else
+            npm ci --prefer-offline
+          fi
+
+      - name: Audit dependencies
+        if: inputs.audit
+        run: npm audit --omit=dev --audit-level=high
+
+      - name: Biome check
+        if: inputs.run-biome
+        run: npx --no biome ci .
+
+      - name: ESLint
+        if: inputs.run-eslint
+        run: npx --no eslint .
+
+      - name: TypeScript check
+        if: inputs.run-tsc
+        run: npx --no tsc --noEmit
+
+      - name: Run tests
+        if: inputs.run-tests
+        run: |
+          if [[ -n "${{ inputs.test-command }}" ]]; then
+            ${{ inputs.test-command }}
+          elif [[ "${{ inputs.package-manager }}" == "pnpm" ]]; then
+            pnpm test
+          else
+            npm test
+          fi
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Node CI"
+            echo "| Check | Ran |"
+            echo "|---|---|"
+            echo "| Biome | ${{ inputs.run-biome }} |"
+            echo "| ESLint | ${{ inputs.run-eslint }} |"
+            echo "| tsc --noEmit | ${{ inputs.run-tsc }} |"
+            echo "| Tests | ${{ inputs.run-tests }} |"
+            echo "| Audit | ${{ inputs.audit }} |"
+            echo "| AR auth | ${{ inputs.needs-ar-auth }} |"
+            echo "| Working dir | \`${{ inputs.working-directory }}\` |"
+          } >> "$GITHUB_STEP_SUMMARY"

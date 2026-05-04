@@ -1,0 +1,76 @@
+# Reusable Trivy scan workflow.
+# Single source of truth for the Trivy version + invocation across the org.
+# Replaces the 5-different-pin drift currently spread across deploy.yml files.
+#
+# Caller example:
+#   jobs:
+#     scan:
+#       uses: Diligent4/.github/.github/workflows/reusable-trivy-scan.yml@main
+#       with:
+#         image-ref: me-west1-docker.pkg.dev/flingoos-production/flingoos-containers/flingoos-mcp:abc1234
+
+name: Reusable Trivy Scan
+
+on:
+  workflow_call:
+    inputs:
+      image-ref:
+        description: 'Container image to scan (e.g., me-west1-docker.pkg.dev/proj/repo/svc:sha)'
+        required: true
+        type: string
+      severity:
+        description: 'Severity threshold; comma-separated subset of CRITICAL,HIGH,MEDIUM,LOW,UNKNOWN'
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH,MEDIUM'
+      ignore-unfixed:
+        description: 'Skip vulnerabilities without an upstream fix'
+        required: false
+        type: boolean
+        default: true
+      trivyignore-path:
+        description: 'Path to .trivyignore file (relative to repo root)'
+        required: false
+        type: string
+        default: '.trivyignore'
+      exit-code:
+        description: 'Exit code on findings — 1 = fail the job, 0 = report only'
+        required: false
+        type: string
+        default: '1'
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+
+jobs:
+  scan:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      # Trivy v0.36.0 — post-March-2026 supply-chain incident clean baseline.
+      # SHA-pinned so a publisher compromise can't silently swap the action body.
+      - name: Trivy vulnerability scan
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ inputs.image-ref }}
+          format: 'table'
+          exit-code: ${{ inputs.exit-code }}
+          severity: ${{ inputs.severity }}
+          ignore-unfixed: ${{ inputs.ignore-unfixed }}
+          trivyignores: ${{ inputs.trivyignore-path }}
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Trivy Scan"
+            echo "- Image: \`${{ inputs.image-ref }}\`"
+            echo "- Severity: \`${{ inputs.severity }}\`"
+            echo "- Ignore unfixed: ${{ inputs.ignore-unfixed }}"
+          } >> "$GITHUB_STEP_SUMMARY"

@@ -1,0 +1,357 @@
+# Reusable Cloud Run deploy workflow.
+# Extracted from flingoos-admin-panel/deploy.yml — the only existing workflow
+# with full SHA-pinning, rollback, and concurrency. Generalized via inputs so
+# every service deploy collapses to a thin caller.
+#
+# Caller example:
+#   jobs:
+#     deploy:
+#       uses: Diligent4/.github/.github/workflows/reusable-cloud-run-deploy.yml@main
+#       with:
+#         service-name: flingoos-mcp
+#         target-env: production
+#         project-id: flingoos-production
+#         project-number: '407742180982'
+#         service-account: flingoos-mcp-sa@flingoos-production.iam.gserviceaccount.com
+#         port: '3000'
+#         memory: 1Gi
+#         min-instances: '1'
+#         max-instances: '10'
+#         env-vars: |
+#           NODE_ENV=production
+#           LOG_LEVEL=info
+#         secrets-mapping: |
+#           OPENAI_API_KEY=apikeys-openai-_platform:latest
+#       secrets: inherit
+
+name: Reusable Cloud Run Deploy
+
+on:
+  workflow_call:
+    inputs:
+      # --- Identity / target ---
+      service-name:
+        required: true
+        type: string
+      target-env:
+        description: 'staging or production (used for labels and step summary)'
+        required: true
+        type: string
+      project-id:
+        required: true
+        type: string
+      project-number:
+        required: true
+        type: string
+      region:
+        required: false
+        type: string
+        default: 'me-west1'
+      service-account:
+        required: true
+        type: string
+
+      # --- Build ---
+      dockerfile-path:
+        required: false
+        type: string
+        default: './Dockerfile'
+      build-context:
+        required: false
+        type: string
+        default: '.'
+      docker-build-args:
+        description: 'Multi-line KEY=VALUE pairs passed as --build-arg'
+        required: false
+        type: string
+        default: ''
+      image-repo:
+        required: false
+        type: string
+        default: 'flingoos-containers'
+
+      # --- Cloud Run runtime ---
+      port:
+        required: false
+        type: string
+        default: '8080'
+      cpu:
+        required: false
+        type: string
+        default: '1'
+      memory:
+        required: false
+        type: string
+        default: '512Mi'
+      cpu-boost:
+        required: false
+        type: boolean
+        default: false
+      execution-environment:
+        required: false
+        type: string
+        default: 'gen2'
+      min-instances:
+        required: false
+        type: string
+        default: '0'
+      max-instances:
+        required: false
+        type: string
+        default: '10'
+      timeout:
+        required: false
+        type: string
+        default: '300s'
+      ingress:
+        required: false
+        type: string
+        default: 'all'
+      allow-unauthenticated:
+        required: false
+        type: boolean
+        default: true
+      custom-audiences:
+        description: 'Comma-separated list of stable custom audiences for OIDC tokens'
+        required: false
+        type: string
+        default: ''
+
+      # --- App config ---
+      env-vars:
+        description: 'Multi-line KEY=VALUE pairs for --set-env-vars'
+        required: false
+        type: string
+        default: ''
+      secrets-mapping:
+        description: 'Multi-line KEY=SECRET_NAME:VERSION pairs for --set-secrets'
+        required: false
+        type: string
+        default: ''
+      extra-deploy-args:
+        description: 'Escape hatch — appended raw to gcloud run deploy (e.g., --network ..., --vpc-egress ...)'
+        required: false
+        type: string
+        default: ''
+
+      # --- Safety ---
+      enable-rollback:
+        description: 'Capture pre-deploy revision and roll back on Ready=False'
+        required: false
+        type: boolean
+        default: true
+      enable-trivy:
+        description: 'Run Trivy scan on built image before pushing/deploying'
+        required: false
+        type: boolean
+        default: true
+      trivy-severity:
+        required: false
+        type: string
+        default: 'CRITICAL,HIGH,MEDIUM'
+
+    outputs:
+      service-url:
+        description: 'Deployed service URL'
+        value: ${{ jobs.deploy.outputs.service-url }}
+      image-ref:
+        description: 'Pushed image reference (SHA-tagged)'
+        value: ${{ jobs.deploy.outputs.image-ref }}
+
+env:
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      service-url: ${{ steps.deploy.outputs.url }}
+      image-ref: ${{ steps.image.outputs.tag-sha }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+
+      - name: Auth to Google Cloud
+        uses: google-github-actions/auth@7c6bc770dae815cd3e89ee6cdf493a5fab2cc093 # v3.0.0
+        with:
+          workload_identity_provider: projects/${{ inputs.project-number }}/locations/global/workloadIdentityPools/github-actions/providers/github
+          service_account: github-actions-deployer@${{ inputs.project-id }}.iam.gserviceaccount.com
+          project_id: ${{ inputs.project-id }}
+
+      - name: Setup gcloud
+        uses: google-github-actions/setup-gcloud@aa5489c8933f4cc7a4f7d45035b3b1440c9c10db # v3.0.1
+        with:
+          project_id: ${{ inputs.project-id }}
+
+      - name: Configure Docker for Artifact Registry
+        run: gcloud auth configure-docker ${{ inputs.region }}-docker.pkg.dev --quiet
+
+      - name: Compute image tag
+        id: image
+        run: |
+          IMAGE="${{ inputs.region }}-docker.pkg.dev/${{ inputs.project-id }}/${{ inputs.image-repo }}/${{ inputs.service-name }}"
+          echo "tag-sha=${IMAGE}:${GITHUB_SHA}" >> "$GITHUB_OUTPUT"
+          echo "tag-latest=${IMAGE}:latest" >> "$GITHUB_OUTPUT"
+
+      - name: Build Docker image
+        working-directory: ${{ inputs.build-context }}
+        run: |
+          BUILD_ARG_FLAGS=""
+          if [[ -n "${{ inputs.docker-build-args }}" ]]; then
+            while IFS= read -r line; do
+              [[ -z "$line" ]] && continue
+              BUILD_ARG_FLAGS+=" --build-arg ${line}"
+            done <<< "${{ inputs.docker-build-args }}"
+          fi
+          docker build \
+            -f "${{ inputs.dockerfile-path }}" \
+            $BUILD_ARG_FLAGS \
+            -t "${{ steps.image.outputs.tag-sha }}" \
+            -t "${{ steps.image.outputs.tag-latest }}" \
+            .
+
+      - name: Trivy scan
+        if: inputs.enable-trivy
+        uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # v0.36.0
+        with:
+          image-ref: ${{ steps.image.outputs.tag-sha }}
+          format: 'table'
+          exit-code: '1'
+          ignore-unfixed: true
+          severity: ${{ inputs.trivy-severity }}
+          trivyignores: .trivyignore
+
+      - name: Push Docker image
+        run: |
+          docker push "${{ steps.image.outputs.tag-sha }}"
+          docker push "${{ steps.image.outputs.tag-latest }}"
+
+      - name: Capture previous revision
+        if: inputs.enable-rollback
+        id: prev
+        run: |
+          PREV=$(gcloud run services describe "${{ inputs.service-name }}" \
+            --project "${{ inputs.project-id }}" \
+            --region "${{ inputs.region }}" \
+            --format='value(status.traffic[0].revisionName)' 2>/dev/null || true)
+          if [[ -z "$PREV" ]]; then
+            PREV=$(gcloud run services describe "${{ inputs.service-name }}" \
+              --project "${{ inputs.project-id }}" \
+              --region "${{ inputs.region }}" \
+              --format='value(status.latestReadyRevisionName)' 2>/dev/null || true)
+          fi
+          if [[ -z "$PREV" ]]; then
+            echo "::notice::No previous revision found — auto-rollback will be skipped."
+          fi
+          echo "rev=${PREV}" >> "$GITHUB_OUTPUT"
+
+      - name: Deploy to Cloud Run
+        id: deploy
+        run: |
+          AUTH_FLAG="--allow-unauthenticated"
+          if [[ "${{ inputs.allow-unauthenticated }}" != "true" ]]; then
+            AUTH_FLAG="--no-allow-unauthenticated"
+          fi
+
+          BOOST_FLAG=""
+          if [[ "${{ inputs.cpu-boost }}" == "true" ]]; then
+            BOOST_FLAG="--cpu-boost"
+          fi
+
+          AUDIENCE_FLAG=""
+          if [[ -n "${{ inputs.custom-audiences }}" ]]; then
+            AUDIENCE_FLAG="--add-custom-audiences=${{ inputs.custom-audiences }}"
+          fi
+
+          ENV_FLAG=""
+          if [[ -n "${{ inputs.env-vars }}" ]]; then
+            ENV_PAIRS=$(echo "${{ inputs.env-vars }}" | grep -v '^$' | paste -sd, -)
+            ENV_FLAG="--set-env-vars=${ENV_PAIRS}"
+          fi
+
+          SECRETS_FLAG=""
+          if [[ -n "${{ inputs.secrets-mapping }}" ]]; then
+            SECRETS_PAIRS=$(echo "${{ inputs.secrets-mapping }}" | grep -v '^$' | paste -sd, -)
+            SECRETS_FLAG="--set-secrets=${SECRETS_PAIRS}"
+          fi
+
+          gcloud run deploy "${{ inputs.service-name }}" \
+            --image="${{ steps.image.outputs.tag-sha }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --platform=managed \
+            --execution-environment="${{ inputs.execution-environment }}" \
+            --port="${{ inputs.port }}" \
+            --cpu="${{ inputs.cpu }}" \
+            --memory="${{ inputs.memory }}" \
+            --min-instances="${{ inputs.min-instances }}" \
+            --max-instances="${{ inputs.max-instances }}" \
+            --timeout="${{ inputs.timeout }}" \
+            --ingress="${{ inputs.ingress }}" \
+            --service-account="${{ inputs.service-account }}" \
+            --labels="commit-sha=${GITHUB_SHA:0:7},deployed-by=github-actions,environment=${{ inputs.target-env }}" \
+            $AUTH_FLAG \
+            $BOOST_FLAG \
+            $AUDIENCE_FLAG \
+            $ENV_FLAG \
+            $SECRETS_FLAG \
+            ${{ inputs.extra-deploy-args }} \
+            --quiet
+
+          URL=$(gcloud run services describe "${{ inputs.service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --format='value(status.url)')
+          echo "url=${URL}" >> "$GITHUB_OUTPUT"
+
+      - name: Verify Ready
+        id: verify
+        run: |
+          sleep 10
+          READY=$(gcloud run services describe "${{ inputs.service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --format=json 2>/dev/null \
+            | jq -r '.status.conditions[] | select(.type=="Ready") | .status')
+          if [[ "$READY" == "True" ]]; then
+            echo "ready=true" >> "$GITHUB_OUTPUT"
+            echo "Service revision is Ready"
+            exit 0
+          fi
+          echo "ready=false" >> "$GITHUB_OUTPUT"
+          echo "::error::Service revision did not reach Ready (status: $READY)"
+          gcloud run services describe "${{ inputs.service-name }}" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --format='value(status.conditions)' || true
+          exit 1
+
+      - name: Rollback on failure
+        if: failure() && steps.verify.outputs.ready == 'false' && inputs.enable-rollback && steps.prev.outputs.rev != ''
+        run: |
+          echo "::warning::Rolling traffic back to ${{ steps.prev.outputs.rev }}"
+          gcloud run services update-traffic "${{ inputs.service-name }}" \
+            --to-revisions="${{ steps.prev.outputs.rev }}=100" \
+            --project="${{ inputs.project-id }}" \
+            --region="${{ inputs.region }}" \
+            --quiet
+
+      - name: Summary
+        if: always()
+        run: |
+          {
+            echo "## Cloud Run Deploy"
+            echo "| Property | Value |"
+            echo "|---|---|"
+            echo "| Service | \`${{ inputs.service-name }}\` |"
+            echo "| Environment | \`${{ inputs.target-env }}\` |"
+            echo "| Project | \`${{ inputs.project-id }}\` |"
+            echo "| Region | \`${{ inputs.region }}\` |"
+            echo "| Image | \`${{ steps.image.outputs.tag-sha }}\` |"
+            echo "| URL | ${{ steps.deploy.outputs.url }} |"
+          } >> "$GITHUB_STEP_SUMMARY"

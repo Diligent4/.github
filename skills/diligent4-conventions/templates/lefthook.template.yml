@@ -1,0 +1,61 @@
+# Diligent4 polyglot pre-commit + pre-push hooks via Lefthook.
+#
+# One-time install per developer:
+#   brew install lefthook    (or `npm i -g lefthook` / `uv tool install lefthook`)
+#   lefthook install
+#
+# Hooks run only on staged/changed files for speed. CI re-runs the same checks
+# authoritatively via reusable-lint-{node,python}.yml.
+
+pre-commit:
+  parallel: true
+  commands:
+    biome:
+      glob: "*.{ts,tsx,js,jsx,mjs,cjs,json,jsonc}"
+      run: npx --no biome check --write {staged_files}
+      stage_fixed: true
+
+    ruff-lint:
+      glob: "*.py"
+      run: uv run ruff check --fix {staged_files}
+      stage_fixed: true
+
+    ruff-format:
+      glob: "*.py"
+      run: uv run ruff format {staged_files}
+      stage_fixed: true
+
+    secrets:
+      run: gitleaks protect --staged --redact --config-path=.gitleaks.toml || gitleaks protect --staged --redact
+
+pre-push:
+  parallel: true
+  commands:
+    typecheck-ts:
+      glob: "*.{ts,tsx}"
+      run: npx --no tsc --noEmit
+
+    typecheck-py:
+      glob: "*.py"
+      run: uv run basedpyright
+
+commit-msg:
+  commands:
+    commitlint:
+      run: npx --no commitlint --edit {1}
+      # Skip if commitlint isn't installed; pre-commit hook is best-effort.
+      skip:
+        - merge
+        - rebase
+
+# Skip rules — these run only when explicitly invoked, not on every commit.
+# Useful for full-tree audits.
+audit:
+  parallel: true
+  commands:
+    biome-all:
+      run: npx --no biome ci .
+    ruff-all:
+      run: uv run ruff check .
+    knip:
+      run: npx --no knip
